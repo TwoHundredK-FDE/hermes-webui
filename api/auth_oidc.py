@@ -130,6 +130,16 @@ def build_authorization_redirect(
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
+    # Providers such as Google return the `amr` MFA claim only when it is
+    # explicitly requested. Ask for the server-configured claim as essential
+    # whenever it is a single top-level claim name; nested claim paths remain
+    # provider-specific and are still enforced fail-closed after token receipt.
+    mfa_claim = str(cfg.get("mfa_claim") or "").strip()
+    if mfa_claim and re.fullmatch(r"[A-Za-z0-9_]+", mfa_claim):
+        params["claims"] = json.dumps(
+            {"id_token": {mfa_claim: {"essential": True}}},
+            separators=(",", ":"),
+        )
     return authorization_endpoint + "?" + urllib.parse.urlencode(params)
 
 
