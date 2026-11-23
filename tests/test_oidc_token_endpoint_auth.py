@@ -12,8 +12,9 @@ explicitly configures a method.
 """
 
 import base64
+import json
 import time
-from urllib.parse import unquote_plus
+from urllib.parse import parse_qs, unquote_plus, urlsplit
 
 
 def _base_cfg(**overrides):
@@ -227,3 +228,38 @@ def test_valid_configured_methods_normalize_case_and_whitespace():
     assert auth_oidc._normalize_token_auth_method(" client_secret_post ") == (
         "client_secret_post"
     )
+
+
+def test_authorization_requests_configured_mfa_claim(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    cfg = _base_cfg(mfa_claim="amr", mfa_values=["mfa"])
+    monkeypatch.setattr(auth_oidc, "_require_oidc_config", lambda: cfg)
+    monkeypatch.setattr(
+        auth_oidc,
+        "_get_discovery_document",
+        lambda _issuer: {"authorization_endpoint": "https://issuer.example/authorize"},
+    )
+    auth_oidc._pending_flows.clear()
+
+    redirect = auth_oidc.build_authorization_redirect("https://webui.example")
+    claims = parse_qs(urlsplit(redirect).query)["claims"][0]
+
+    assert json.loads(claims) == {"id_token": {"amr": {"essential": True}}}
+
+
+def test_authorization_omits_unconfigured_mfa_claim_request(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    cfg = _base_cfg()
+    monkeypatch.setattr(auth_oidc, "_require_oidc_config", lambda: cfg)
+    monkeypatch.setattr(
+        auth_oidc,
+        "_get_discovery_document",
+        lambda _issuer: {"authorization_endpoint": "https://issuer.example/authorize"},
+    )
+    auth_oidc._pending_flows.clear()
+
+    redirect = auth_oidc.build_authorization_redirect("https://webui.example")
+
+    assert "claims" not in parse_qs(urlsplit(redirect).query)

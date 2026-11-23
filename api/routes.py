@@ -84,6 +84,32 @@ from api.shares import (
 logger = logging.getLogger(__name__)
 
 
+def _profile_bound_session(handler):
+    """Return the authenticated profile binding, if this request has one.
+
+    Profile-bound SSO is a tenant boundary: profile administration and profile
+    discovery must be enforced by the API even when a client bypasses the UI.
+    """
+    # Internal/test handlers without an HTTP header collection cannot carry a
+    # browser session or trusted identity. Treat those as unbound; if headers
+    # are present but identity resolution fails, retain the fail-closed result.
+    if not getattr(handler, "headers", None):
+        return None
+    try:
+        from api.auth import ensure_trusted_auth_session
+
+        info = ensure_trusted_auth_session(handler)
+    except Exception:
+        logger.exception("Could not resolve profile-bound auth session")
+        # Distinguish an unresolved identity from a verified unbound session;
+        # callers must not turn an auth lookup failure into broader access.
+        return False
+    if not info:
+        return None
+    name = str(info.get("bound_profile") or "").strip()
+    return name or None
+
+
 def _publish_session_list_changed(
     reason: str,
     *,
@@ -8846,6 +8872,13 @@ def _embedded_terminal_gate_allows(handler) -> bool:
     A deliberately-exposed passwordless server (access secured at another layer)
     opts out with ``HERMES_WEBUI_ONBOARDING_OPEN=1``.
     """
+    # A profile-bound SSO session represents a tenant owner in a shared
+    # deployment. Even though that owner is authenticated, a PTY would grant
+    # arbitrary commands as the shared Hermes service account and cross the
+    # tenant boundary. Keep the terminal for unbound operator sessions only.
+    bound_profile = _profile_bound_session(handler)
+    if bound_profile is not None:
+        return False
     return _onboarding_gate_allows(handler)
 
 
@@ -18435,7 +18468,8 @@ def handle_get(handler, parsed) -> bool:
         # the server — every submit. The OIDC SSO entry point stays the
         # sole path. ``is_password_auth_enabled`` is the same predicate
         # ``/api/auth/status`` reports as ``password_auth_enabled``.
-        from api.auth import are_passkeys_enabled, is_password_auth_enabled
+        from api.auth import are_passkeys_enabled, is_oidc_profile_binding_enabled, is_password_auth_enabled
+        _profile_bound_sso = is_oidc_profile_binding_enabled()
 
         # The password INPUT is gated on a configured password, but the passkey
         # button must survive a passwordless-passkey deployment: settings expose
@@ -18447,14 +18481,14 @@ def handle_get(handler, parsed) -> bool:
             '<button type="button" id="passkey-login" class="passkey-login" '
             'style="display:none">Sign in with passkey</button>'
         )
-        if is_password_auth_enabled():
+        if not _profile_bound_sso and is_password_auth_enabled():
             _password_form_html = (
                 f'<input type="password" id="pw" '
                 f'placeholder="{_html.escape(_login_strings["placeholder"])}" autofocus>'
                 f'<button type="submit">{_html.escape(_login_strings["btn"])}</button>'
                 f'{_passkey_button_html}'
             )
-        elif are_passkeys_enabled():
+        elif not _profile_bound_sso and are_passkeys_enabled():
             _password_form_html = _passkey_button_html
         else:
             _password_form_html = ""
@@ -18518,7 +18552,13 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"error": str(exc)}, status=404)
         except OIDCAuthError as exc:
             return j(handler, {"error": str(exc)}, status=exc.status_code)
-        cookie_val = create_session()
+        cookie_val = create_session(
+            auth_type="oidc",
+            username=str(result.get("email") or result.get("subject") or "oidc-user"),
+            bound_profile=result.get("bound_profile"),
+            role=result.get("role"),
+            mfa_verified=result.get("mfa_verified") is True,
+        )
         handler.send_response(302)
         handler.send_header(
             "Location",
@@ -18535,9 +18575,10 @@ def handle_get(handler, parsed) -> bool:
         from api.auth import (
             _passkey_feature_flag_enabled,
             ensure_trusted_auth_session,
-            get_password_hash,
             is_auth_enabled,
             is_oidc_auth_enabled,
+            is_oidc_profile_binding_enabled,
+            is_password_auth_enabled,
             is_trusted_auth_enabled,
         )
         from api.passkeys import registered_credentials
@@ -18551,7 +18592,7 @@ def handle_get(handler, parsed) -> bool:
             logged_in = bool(session_info)
         passkey_flag = _passkey_feature_flag_enabled()
         passkeys = registered_credentials() if passkey_flag else []
-        password_auth_enabled = get_password_hash() is not None
+        password_auth_enabled = is_password_auth_enabled()
         payload = {
             "auth_enabled": auth_enabled,
             "logged_in": logged_in,
@@ -18565,10 +18606,13 @@ def handle_get(handler, parsed) -> bool:
         }
         if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
             payload["trusted_auth_enabled"] = True
-        if session_info and session_info.get("auth_type") == "trusted":
+        if session_info and session_info.get("auth_type") in {"trusted", "oidc"}:
             payload["auth_type"] = session_info.get("auth_type")
-            payload["user"] = session_info.get("username")
-            payload["bound_profile"] = session_info.get("bound_profile")
+            payload["user"] = session_info.get("username") or session_info.get("email")
+            if session_info.get("bound_profile"):
+                payload["bound_profile"] = session_info.get("bound_profile")
+            if session_info.get("role"):
+                payload["role"] = session_info.get("role")
         return j(handler, payload)
 
     if parsed.path.startswith("/api/share/"):
@@ -19675,12 +19719,27 @@ def handle_get(handler, parsed) -> bool:
             diag.stage("active_profile_lookup") if diag else None
             active = profiles_api.get_active_profile_name()
             diag.stage("isolated_mode_check") if diag else None
+            bound_profile = _profile_bound_session(handler)
+            single_profile_mode = _is_isolated_profile_mode()
+            if bound_profile is False:
+                profiles_payload = []
+                single_profile_mode = True
+            elif bound_profile:
+                from api.profiles import _profiles_match
+
+                profiles_payload = [
+                    row for row in profiles_payload
+                    if _profiles_match(row.get("name"), bound_profile)
+                ]
+                # A profile-bound identity is always presented as a single
+                # tenant, even when the WebUI process hosts other profiles.
+                single_profile_mode = True
             return j(
                 handler,
                 {
                     "profiles": profiles_payload,
                     "active": active,
-                    "single_profile_mode": _is_isolated_profile_mode(),
+                    "single_profile_mode": single_profile_mode,
                 },
             )
         finally:
@@ -20571,6 +20630,23 @@ def handle_post(handler, parsed) -> bool:
         requested_profile, requested_profile_invalid = _new_session_requested_profile(body)
         if requested_profile_invalid:
             return bad(handler, "invalid profile", 400)
+        # A client may name the profile for a new session, but a profile-bound
+        # SSO identity (or a dedicated isolated-profile deployment) must not
+        # use that field to select another tenant's workspace. Enforce this
+        # before resolving workspaces, creating worktrees, or writing session
+        # state. The UI hides profile switching; this is the API boundary.
+        bound_profile = _profile_bound_session(handler)
+        if bound_profile is False:
+            return bad(handler, "Unable to resolve the authenticated profile", 403)
+        expected_profile = bound_profile
+        if expected_profile is None and _is_isolated_profile_mode():
+            expected_profile = _get_active_profile_name()
+        if (
+            expected_profile
+            and requested_profile
+            and not _profiles_match(requested_profile, expected_profile)
+        ):
+            return bad(handler, "Profile is bound to the current session", 403)
         # Stage timers: one [SLOW] line (same 2s threshold / _safe_webui_print
         # route as GET /api/session) so tail latency can be attributed.
         _sn_t0 = time.monotonic()
@@ -22679,6 +22755,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 409)
 
     if parsed.path == "/api/profile/create":
+        if _profile_bound_session(handler) is not None:
+            return bad(handler, "Profile-bound sessions cannot create profiles", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -22719,6 +22797,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
 
     if parsed.path == "/api/profile/delete":
+        if _profile_bound_session(handler) is not None:
+            return bad(handler, "Profile-bound sessions cannot delete profiles", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -24050,11 +24130,14 @@ def handle_post(handler, parsed) -> bool:
             create_session,
             set_auth_cookie,
             is_auth_enabled,
+            is_oidc_profile_binding_enabled,
         )
         from api.auth import _check_login_rate, _record_login_attempt, _clear_login_attempts
 
         if not is_auth_enabled():
             return j(handler, {"ok": True, "message": "Auth not enabled"})
+        if is_oidc_profile_binding_enabled():
+            return j(handler, {"error": "Profile-bound SSO is required"}, status=403)
         client_ip = _login_client_ip(handler)
         if not _check_login_rate(client_ip):
             return j(
@@ -24080,13 +24163,15 @@ def handle_post(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/auth/passkey/options":
-        from api.auth import _passkey_feature_flag_enabled, is_auth_enabled
+        from api.auth import _passkey_feature_flag_enabled, is_auth_enabled, is_oidc_profile_binding_enabled
         from api.passkeys import PasskeyError, PasskeyRateLimitError, authentication_options
 
-        if not _passkey_feature_flag_enabled():
-            return j(handler, {"error": "Passkey support is disabled. Set HERMES_WEBUI_PASSKEY=1 or webui_passkey_enabled: true to enable."}, status=404)
         if not is_auth_enabled():
             return j(handler, {"error": "Auth not enabled"}, status=400)
+        if is_oidc_profile_binding_enabled():
+            return j(handler, {"error": "Profile-bound SSO is required"}, status=403)
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled. Set HERMES_WEBUI_PASSKEY=1 or webui_passkey_enabled: true to enable."}, status=404)
         try:
             return j(handler, {"ok": True, "publicKey": authentication_options(handler)})
         except PasskeyRateLimitError as e:
@@ -24095,14 +24180,16 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), status=400)
 
     if parsed.path == "/api/auth/passkey/login":
-        from api.auth import _passkey_feature_flag_enabled, create_session, is_auth_enabled, set_auth_cookie
+        from api.auth import _passkey_feature_flag_enabled, create_session, is_auth_enabled, is_oidc_profile_binding_enabled, set_auth_cookie
         from api.auth import _check_login_rate, _record_login_attempt
         from api.passkeys import PasskeyError, finish_login
 
-        if not _passkey_feature_flag_enabled():
-            return j(handler, {"error": "Passkey support is disabled."}, status=404)
         if not is_auth_enabled():
             return j(handler, {"error": "Auth not enabled"}, status=400)
+        if is_oidc_profile_binding_enabled():
+            return j(handler, {"error": "Profile-bound SSO is required"}, status=403)
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled."}, status=404)
         client_ip = _login_client_ip(handler)
         if not _check_login_rate(client_ip):
             return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)

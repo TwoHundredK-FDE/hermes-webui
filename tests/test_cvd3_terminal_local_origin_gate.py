@@ -101,6 +101,17 @@ def test_terminal_gate_allows_any_client_when_auth_enabled(monkeypatch):
     assert routes._embedded_terminal_gate_allows(handler) is True
 
 
+def test_terminal_gate_denies_profile_bound_tenant_sessions(monkeypatch):
+    """SSO tenant owners must never receive a shell as the shared Hermes user."""
+    from api import routes
+
+    monkeypatch.setattr(routes, "_profile_bound_session", lambda _handler: "shop_a")
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: True)
+    handler = _Handler(client_ip="8.8.8.8", headers={})
+
+    assert routes._embedded_terminal_gate_allows(handler) is False
+
+
 def test_terminal_gate_honors_onboarding_open_escape_hatch(monkeypatch):
     """Deliberately-exposed passwordless server (secured elsewhere) opts out."""
     from api import routes

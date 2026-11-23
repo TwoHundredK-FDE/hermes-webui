@@ -376,6 +376,23 @@ def test_bound_profile_match_allowed(monkeypatch):
     assert handler.status is None
 
 
+def test_native_oidc_session_is_forced_into_its_bound_profile(monkeypatch):
+    _trusted_env(monkeypatch, header=None)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="owner@example.com",
+        bound_profile="store_alpha",
+    )
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+
+    result = auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query=""))
+
+    assert result is True
+    assert profiles.get_active_profile_name() == "store_alpha"
+    assert any("hermes_profile=store_alpha" in value for value in handler._pending_set_cookies)
+
+
 def test_profile_switch_rejects_other_bound_profile(monkeypatch):
     cookie = auth.create_session(
         auth_type="trusted",
@@ -446,6 +463,85 @@ def test_profile_switch_accepts_bound_profile(monkeypatch):
     assert handler.status == 200
     assert handler.json_body()["profile"] == "devops"
     assert any(value.startswith("hermes_profile=") for value in handler.header_values("Set-Cookie"))
+
+
+def test_bound_session_only_sees_its_profile(monkeypatch):
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="store-owner@example.com",
+        bound_profile="store_alpha",
+    )
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    monkeypatch.setattr("api.profiles.list_profiles_api", lambda: [
+        {"name": "store_alpha"},
+        {"name": "store_beta"},
+    ])
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "store_alpha")
+    monkeypatch.setattr("api.profiles._is_isolated_profile_mode", lambda: False)
+
+    routes.handle_get(handler, SimpleNamespace(path="/api/profiles", query=""))
+
+    payload = handler.json_body()
+    assert handler.status == 200
+    assert [row["name"] for row in payload["profiles"]] == ["store_alpha"]
+    assert payload["active"] == "store_alpha"
+    assert payload["single_profile_mode"] is True
+
+
+def test_internal_handler_without_headers_is_unbound():
+    assert routes._profile_bound_session(SimpleNamespace()) is None
+
+
+@pytest.mark.parametrize(
+    ("bound_profile", "isolated_mode"),
+    [("store_alpha", False), (None, True)],
+)
+def test_bound_or_isolated_session_cannot_create_session_in_another_profile(
+    monkeypatch, bound_profile, isolated_mode
+):
+    handler = _Handler()
+    handler.command = "POST"
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"profile": "store_beta"})
+    monkeypatch.setattr(routes, "_profile_bound_session", lambda _handler: bound_profile)
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: isolated_mode)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "store_alpha")
+    monkeypatch.setattr(
+        routes,
+        "_resolve_new_session_workspace",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("foreign profile workspace must not be resolved")
+        ),
+    )
+
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/new", query=""))
+
+    assert handler.status == 403
+    assert handler.json_body()["error"] == "Profile is bound to the current session"
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/profile/create", {"name": "store_gamma"}),
+        ("/api/profile/delete", {"name": "store_beta"}),
+    ],
+)
+def test_bound_session_cannot_create_or_delete_profiles(monkeypatch, path, body):
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="store-owner@example.com",
+        bound_profile="store_alpha",
+    )
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    handler.command = "POST"
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+
+    routes.handle_post(handler, SimpleNamespace(path=path, query=""))
+
+    assert handler.status == 403
+    assert "Profile-bound sessions" in handler.json_body()["error"]
 
 
 def test_auth_status_reports_trusted_session_fields(monkeypatch):
@@ -623,6 +719,35 @@ def test_existing_trusted_session_without_header_is_invalidated(monkeypatch):
     assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is False
     assert handler.status == 401
     assert auth.verify_session(cookie) is False
+
+
+def test_profile_bound_oidc_invalidates_existing_unbound_session(monkeypatch):
+    monkeypatch.setattr(auth, "is_oidc_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_oidc_profile_binding_enabled", lambda: True)
+    cookie = auth.create_session(username="legacy-admin")
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is False
+    assert handler.status == 401
+    assert handler.json_body() == {"error": "Profile-bound SSO is required"}
+    assert auth.verify_session(cookie) is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/auth/login", "/api/auth/passkey/options", "/api/auth/passkey/login"],
+)
+def test_profile_bound_oidc_rejects_unbound_login_methods(monkeypatch, path):
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_oidc_profile_binding_enabled", lambda: True)
+    body = b'{"password":"legacy-password"}'
+    handler = _Handler(headers={"Content-Length": str(len(body)), "Origin": "https://hermes.example"})
+    handler.command = "POST"
+    handler.rfile = io.BytesIO(body)
+
+    routes.handle_post(handler, SimpleNamespace(path=path, query=""))
+    assert handler.status == 403
+    assert handler.json_body() == {"error": "Profile-bound SSO is required"}
 
 
 def test_untrusted_existing_trusted_session_is_rejected_by_all_consumers(monkeypatch):
