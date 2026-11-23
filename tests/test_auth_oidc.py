@@ -5,6 +5,7 @@ No whitespace splitting under any heuristic; the warning is diagnostic only.
 """
 import logging
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +27,10 @@ def _clear_oidc_environment(monkeypatch):
         "HERMES_WEBUI_OIDC_PROFILE_CLAIM",
         "HERMES_WEBUI_OIDC_PROFILE_MAP",
         "HERMES_WEBUI_OIDC_PROFILE_TOOLSETS",
+        "HERMES_WEBUI_OIDC_ROLE_CLAIM",
+        "HERMES_WEBUI_OIDC_ROLE_MAP",
+        "HERMES_WEBUI_OIDC_MFA_CLAIM",
+        "HERMES_WEBUI_OIDC_MFA_VALUES",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -209,6 +214,110 @@ def test_oidc_profile_binding_requires_one_exact_store_profile():
     ) is None
 
 
+def test_oidc_role_mapping_requires_exactly_one_owner_or_viewer_role():
+    from api.auth_oidc import _resolve_role
+
+    mapping = {"shop-a-owner": "owner", "shop-a-viewer": "viewer"}
+    assert _resolve_role({"groups": ["shop-a-viewer"]}, role_claim="groups", role_map=mapping) == "viewer"
+    with pytest.raises(OIDCAuthError, match="exactly one WebUI role"):
+        _resolve_role({"groups": ["unmapped"]}, role_claim="groups", role_map=mapping)
+    with pytest.raises(OIDCAuthError, match="exactly one WebUI role"):
+        _resolve_role({"groups": ["shop-a-owner", "shop-a-viewer"]}, role_claim="groups", role_map=mapping)
+
+
+def test_profile_bound_oidc_requires_an_idp_asserted_mfa_value():
+    from api.auth_oidc import _resolve_mfa
+
+    assert _resolve_mfa({"amr": ["pwd", "otp"]}, mfa_claim="amr", mfa_values=["otp", "mfa"]) is True
+    with pytest.raises(OIDCAuthError, match="required MFA policy"):
+        _resolve_mfa({"amr": ["pwd"]}, mfa_claim="amr", mfa_values=["otp", "mfa"])
+
+
+def test_oidc_profile_binding_requires_a_server_owned_role_mapping(monkeypatch):
+    import api.auth as auth
+    from api.auth_oidc import OIDCConfigError
+
+    config = {"webui_oidc": {
+        "issuer": "https://issuer.example", "client_id": "webui",
+        "allow_claim": "email", "allow_values": ["owner@example.com"],
+        "profile_claim": "groups", "profile_map": {"shop-owner": "shop_a"},
+    }}
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_PROFILE_TOOLSETS", '{"shop_a":[]}')
+    with patch("api.auth_oidc.get_config", return_value=config):
+        assert auth_oidc.is_oidc_enabled() is False
+        with pytest.raises(OIDCConfigError, match="role_claim and role_map"):
+            auth_oidc._require_oidc_config()
+    with patch("api.auth.get_config", return_value=config):
+        warning = auth.get_oidc_startup_warning()
+        assert warning and "role_claim and role_map" in warning
+
+
+def test_oidc_profile_binding_rejects_missing_mfa_claim_configuration(monkeypatch):
+    from api.auth_oidc import OIDCConfigError
+
+    config = {"webui_oidc": {
+        "issuer": "https://issuer.example", "client_id": "webui",
+        "allow_claim": "email", "allow_values": ["owner@example.com"],
+        "profile_claim": "groups", "profile_map": {"shop-owner": "shop_a"},
+        "role_claim": "groups", "role_map": {"shop-owner": "owner"},
+    }}
+    monkeypatch.setenv("HERMES_WEBUI_OIDC_PROFILE_TOOLSETS", '{"shop_a":[]}')
+    with patch("api.auth_oidc.get_config", return_value=config):
+        assert auth_oidc.is_oidc_enabled() is False
+        with pytest.raises(OIDCConfigError, match="mfa_claim and mfa_values"):
+            auth_oidc._require_oidc_config()
+
+
+def test_viewer_oidc_session_is_read_only_at_request_boundary(monkeypatch):
+    import api.auth as auth
+
+    class Handler:
+        command = "POST"
+        status = None
+        body = b""
+        headers = {"Cookie": ""}
+
+        def send_response(self, status): self.status = status
+        def send_header(self, *_args): pass
+        def end_headers(self): pass
+        def write_body(self, body): self.body = body
+        @property
+        def wfile(self): return self
+        def write(self, body): self.body = body
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda _handler: {
+        "auth_type": "oidc", "role": "viewer", "bound_profile": "shop_a", "mfa_verified": True,
+    })
+    monkeypatch.setattr(auth, "is_oidc_profile_binding_enabled", lambda: True)
+    monkeypatch.setattr(auth, "_apply_trusted_session_profile", lambda *_args: None)
+    monkeypatch.setattr(auth, "trusted_session_allows_active_profile", lambda _info: True)
+
+    handler = Handler()
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/admin/booking", query="")) is False
+    assert handler.status == 403
+    assert b"read-only" in handler.body
+
+    handler = Handler()
+    handler.command = "GET"
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/admin/bookings", query="")) is True
+
+    monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda _handler: {
+        "auth_type": "oidc", "role": None, "bound_profile": "shop_a", "mfa_verified": True,
+    })
+    handler = Handler()
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/admin/bookings", query="")) is False
+    assert handler.status == 403, "pre-role-change sessions must fail closed"
+
+    monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda _handler: {
+        "auth_type": "oidc", "role": "viewer", "bound_profile": "shop_a", "mfa_verified": False,
+    })
+    handler = Handler()
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/admin/bookings", query="")) is False
+    assert handler.status == 403
+    assert b"MFA" in handler.body, "pre-MFA sessions must fail closed"
+
+
 def test_tenant_oidc_requires_server_owned_toolset_policy_for_every_profile(monkeypatch):
     from api.auth_oidc import OIDCConfigError
 
@@ -219,6 +328,10 @@ def test_tenant_oidc_requires_server_owned_toolset_policy_for_every_profile(monk
         "allow_values": ["owner@example.com"],
         "profile_claim": "groups",
         "profile_map": {"shop-a-owner": "shop_a", "shop-b-owner": "shop_b"},
+        "role_claim": "groups",
+        "role_map": {"shop-a-owner": "owner", "shop-b-owner": "owner"},
+        "mfa_claim": "amr",
+        "mfa_values": ["otp", "mfa"],
     }}
     with patch("api.auth_oidc.get_config", return_value=config):
         assert auth_oidc.is_oidc_enabled() is False

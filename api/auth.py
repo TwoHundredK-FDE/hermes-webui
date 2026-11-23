@@ -634,6 +634,28 @@ def get_oidc_startup_warning() -> str | None:
     issuer = bool(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER"))
     client_id = bool(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID"))
     allow_claim = bool(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM"))
+    profile_claim = bool(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM"))
+    role_claim = bool(pick("role_claim", "HERMES_WEBUI_OIDC_ROLE_CLAIM"))
+    mfa_claim = bool(pick("mfa_claim", "HERMES_WEBUI_OIDC_MFA_CLAIM"))
+    profile_map_raw = os.getenv("HERMES_WEBUI_OIDC_PROFILE_MAP")
+    if profile_map_raw is None:
+        profile_map_raw = raw.get("profile_map")
+    role_map_raw = os.getenv("HERMES_WEBUI_OIDC_ROLE_MAP")
+    if role_map_raw is None:
+        role_map_raw = raw.get("role_map")
+    def mapping_present(value) -> bool:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return False
+        return isinstance(value, dict) and bool(value)
+    profile_binding_present = profile_claim or mapping_present(profile_map_raw)
+    role_mapping_present = role_claim and mapping_present(role_map_raw)
+    mfa_values_raw = os.getenv("HERMES_WEBUI_OIDC_MFA_VALUES")
+    if mfa_values_raw is None:
+        mfa_values_raw = raw.get("mfa_values")
+    mfa_values_present = bool(mfa_values_raw)
     raw_allow_env = os.getenv("HERMES_WEBUI_OIDC_ALLOW_VALUES")
     raw_allow = raw_allow_env if raw_allow_env is not None else raw.get("allow_values")
     normalized_allow_values = []
@@ -666,6 +688,15 @@ def get_oidc_startup_warning() -> str | None:
         warnings.append(
             "Native OIDC login is only partially configured; missing "
             f"{joined}. The WebUI will not enable OIDC auth until all four fields are set."
+        )
+
+    if profile_binding_present and not role_mapping_present:
+        warnings.append(
+            "Profile-bound OIDC requires both role_claim and role_map; shared-profile login will remain disabled until an exact owner/viewer role mapping is configured."
+        )
+    if profile_binding_present and not (mfa_claim and mfa_values_present):
+        warnings.append(
+            "Profile-bound OIDC requires mfa_claim and mfa_values to verify an IdP-asserted MFA method; shared-profile login will remain disabled without them."
         )
 
     # Detect whitespace-only allow_values scalar that may contain multiple intended values.
@@ -723,17 +754,19 @@ def verify_password(plain: str) -> bool:
     return False
 
 
-def create_session(*, auth_type: str | None = None, username: str | None = None, bound_profile: str | None = None) -> str:
+def create_session(*, auth_type: str | None = None, username: str | None = None, bound_profile: str | None = None, role: str | None = None, mfa_verified: bool = False) -> str:
     """Create a new auth session. Returns signed cookie value."""
     token = secrets.token_hex(32)
     expiry = time.time() + _resolve_session_ttl()
     record: float | dict
-    if any(value is not None for value in (auth_type, username, bound_profile)):
+    if any(value is not None for value in (auth_type, username, bound_profile, role)) or mfa_verified:
         record = {
             'expiry': expiry,
             'auth_type': auth_type,
             'username': username,
             'bound_profile': bound_profile,
+            'role': role,
+            'mfa_verified': bool(mfa_verified),
         }
     else:
         record = expiry
@@ -1294,6 +1327,40 @@ def check_auth(handler, parsed) -> bool:
             handler.end_headers()
             handler.wfile.write(body)
             return False
+        if is_oidc_profile_binding_enabled() and session_info.get('auth_type') == 'oidc' and session_info.get('role') not in {'owner', 'viewer'}:
+            # Requiring roles at login is not enough: sessions issued before a
+            # role-policy change remain valid cookies. Fail them closed here.
+            if cookie_val:
+                invalidate_session(cookie_val)
+            body = b'{"error":"This account has no current WebUI role; sign in again"}'
+            handler.send_response(403)
+            handler.send_header('Content-Type', 'application/json' if parsed.path.startswith('/api/') else 'text/plain; charset=utf-8')
+            handler.send_header('Content-Length', str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
+            return False
+        if is_oidc_profile_binding_enabled() and session_info.get('auth_type') == 'oidc' and session_info.get('mfa_verified') is not True:
+            if cookie_val:
+                invalidate_session(cookie_val)
+            body = b'{"error":"This session has no verified MFA assertion; sign in again"}'
+            handler.send_response(403)
+            handler.send_header('Content-Type', 'application/json' if parsed.path.startswith('/api/') else 'text/plain; charset=utf-8')
+            handler.send_header('Content-Length', str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
+            return False
+        if session_info.get('auth_type') == 'oidc' and session_info.get('role') == 'viewer':
+            method = str(getattr(handler, 'command', '') or '').upper()
+            is_safe = method in {'GET', 'HEAD', 'OPTIONS'}
+            is_logout = parsed.path == '/api/auth/logout' and method == 'POST'
+            if not (is_safe or is_logout):
+                body = b'{"error":"This account has read-only access"}'
+                handler.send_response(403)
+                handler.send_header('Content-Type', 'application/json')
+                handler.send_header('Content-Length', str(len(body)))
+                handler.end_headers()
+                handler.wfile.write(body)
+                return False
         return True
     # Not authorized
     if parsed.path.startswith('/api/'):

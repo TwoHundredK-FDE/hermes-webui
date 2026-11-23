@@ -29,10 +29,38 @@ that boundary.
 - Profile-bound sessions cannot use the embedded PTY terminal. Authentication
   does not grant a tenant arbitrary commands as the shared Hermes service user.
   Configure a separate operator profile for host administration.
+- Profile-bound OIDC requires server-owned `role_claim`/`role_map` and
+  `mfa_claim`/`mfa_values` in addition to profile binding. A login must resolve
+  to exactly one `owner` or `viewer` role and contain an exact configured MFA
+  assertion from the IdP. Missing assertions are rejected at login; existing
+  sessions without the recorded assertion fail closed. Viewers may use safe
+  read methods only; every write method and chat/tool command is rejected at
+  the central request authorization boundary. Owners retain the profile's
+  configured capabilities.
 
-This is a profile ownership boundary with a chat tool allowlist, not full role-
-based access control or an OS-level sandbox. It does not define billing,
-support, or platform-operator roles. A profile-specific CRM key must still
+Example for an IdP that emits group names in a `groups` array:
+
+```yaml
+webui_oidc:
+  profile_claim: groups
+  profile_map:
+    shop-a-owner: shop_a
+    shop-a-viewer: shop_a
+  role_claim: groups
+  role_map:
+    shop-a-owner: owner
+    shop-a-viewer: viewer
+  mfa_claim: amr
+  mfa_values: [otp, mfa]
+```
+
+Keep these maps in server-owned configuration. Replace the example MFA values
+with the identity provider's documented assertion values. Do not let a tenant
+profile change the mapping that grants its own login role or MFA status.
+
+This provides an owner/viewer role boundary with a chat tool allowlist, not a
+general-purpose role system or an OS-level sandbox. It does not define separate
+billing, support, or platform-operator roles. A profile-specific CRM key must still
 enforce tenant and feature scopes in the Worker. IdP policy owns MFA. Keep
 tenant profile workspaces and MCP configuration separate, and do not add
 host-level tools to a tenant allowlist. A future tenant-admin console must add
