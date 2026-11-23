@@ -13,6 +13,10 @@ that boundary.
 - `POST /api/profile/switch` may select only the bound profile.
 - `POST /api/profile/create` and `POST /api/profile/delete` are forbidden for
   profile-bound sessions.
+- `POST /api/session/new` may omit `profile` or name the bound profile, but it
+  rejects a different profile before workspace resolution, worktree creation,
+  or session persistence. Dedicated isolated-profile deployments enforce the
+  same rule against their configured profile.
 - If the server cannot resolve the session binding, profile enumeration fails
   closed and profile mutations are denied. A verified session with no binding
   retains the server's existing global profile-management behavior.
