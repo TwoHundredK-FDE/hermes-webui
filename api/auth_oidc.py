@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import socket
 import threading
@@ -162,10 +163,16 @@ def complete_authorization_code_flow(
         allow_claim=cfg.get("allow_claim"),
         allow_values=cfg.get("allow_values") or [],
     )
+    bound_profile = _resolve_bound_profile(
+        claims,
+        profile_claim=cfg.get("profile_claim", ""),
+        profile_map=cfg.get("profile_map") or {},
+    )
     return {
         "next_path": pending["next_path"],
         "subject": str(claims.get("sub") or ""),
         "email": str(claims.get("email") or ""),
+        "bound_profile": bound_profile,
         "claims": claims,
     }
 
@@ -187,6 +194,21 @@ def _resolve_oidc_config() -> dict[str, Any]:
     scopes = _normalize_scopes(pick("scopes", "HERMES_WEBUI_OIDC_SCOPES"))
     raw_allow = pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
     allow_values = _normalize_allow_values(raw_allow)
+    raw_profile_map = pick("profile_map", "HERMES_WEBUI_OIDC_PROFILE_MAP")
+    if isinstance(raw_profile_map, str):
+        try:
+            raw_profile_map = json.loads(raw_profile_map)
+        except (TypeError, ValueError):
+            raw_profile_map = None
+    profile_map = raw_profile_map if isinstance(raw_profile_map, dict) else {}
+    profile_map = {
+        str(claim_value).strip(): str(profile).strip()
+        for claim_value, profile in profile_map.items()
+        if isinstance(claim_value, str)
+        and isinstance(profile, str)
+        and str(claim_value).strip()
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", str(profile).strip())
+    }
     if (
         raw_allow is not None
         and not isinstance(raw_allow, (list, tuple, set))
@@ -204,6 +226,8 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "scopes": scopes,
         "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
         "allow_values": allow_values,
+        "profile_claim": str(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM") or "").strip(),
+        "profile_map": profile_map,
         "token_auth_method": _normalize_token_auth_method(
             pick("token_auth_method", "HERMES_WEBUI_OIDC_TOKEN_AUTH_METHOD")
         ),
@@ -218,7 +242,28 @@ def _require_oidc_config() -> dict[str, Any]:
         raise OIDCConfigError(
             "Native OIDC login requires webui_oidc.allow_claim and allow_values"
         )
+    if bool(cfg.get("profile_claim")) != bool(cfg.get("profile_map")):
+        raise OIDCConfigError(
+            "Native OIDC profile binding requires both webui_oidc.profile_claim and profile_map"
+        )
     return cfg
+
+
+def _resolve_bound_profile(
+    claims: dict[str, Any], *, profile_claim: str, profile_map: dict[str, str]
+) -> str | None:
+    """Map one exact OIDC claim value to one WebUI profile, failing closed on ambiguity."""
+    if not profile_claim and not profile_map:
+        return None
+    if not profile_claim or not profile_map:
+        raise OIDCConfigError(
+            "Native OIDC profile binding requires both profile_claim and profile_map"
+        )
+    claim_value = _get_claim_path(claims, profile_claim)
+    mapped = {_profile for value in _claim_values(claim_value) if (_profile := profile_map.get(value))}
+    if len(mapped) != 1:
+        raise OIDCAuthError("OIDC identity is not assigned to exactly one profile", status_code=403)
+    return next(iter(mapped))
 
 
 def _normalize_token_auth_method(raw: Any) -> str:

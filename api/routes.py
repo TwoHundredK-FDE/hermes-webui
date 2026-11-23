@@ -18518,7 +18518,11 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"error": str(exc)}, status=404)
         except OIDCAuthError as exc:
             return j(handler, {"error": str(exc)}, status=exc.status_code)
-        cookie_val = create_session()
+        cookie_val = create_session(
+            auth_type="oidc",
+            username=str(result.get("email") or result.get("subject") or "oidc-user"),
+            bound_profile=result.get("bound_profile"),
+        )
         handler.send_response(302)
         handler.send_header(
             "Location",
@@ -18565,10 +18569,11 @@ def handle_get(handler, parsed) -> bool:
         }
         if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
             payload["trusted_auth_enabled"] = True
-        if session_info and session_info.get("auth_type") == "trusted":
+        if session_info and session_info.get("auth_type") in {"trusted", "oidc"}:
             payload["auth_type"] = session_info.get("auth_type")
-            payload["user"] = session_info.get("username")
-            payload["bound_profile"] = session_info.get("bound_profile")
+            payload["user"] = session_info.get("username") or session_info.get("email")
+            if session_info.get("bound_profile"):
+                payload["bound_profile"] = session_info.get("bound_profile")
         return j(handler, payload)
 
     if parsed.path.startswith("/api/share/"):

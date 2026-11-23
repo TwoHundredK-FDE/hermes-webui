@@ -120,13 +120,22 @@ def test_oidc_callback_exchanges_code_and_sets_existing_session_cookie(monkeypat
         captured["request_base_url"] = request_base_url
         captured["state"] = state
         captured["code"] = code
-        return {"next_path": "/chat/123"}
+        return {
+            "next_path": "/chat/123",
+            "subject": "oidc-subject",
+            "email": "owner@example.com",
+            "bound_profile": "store_alpha",
+        }
 
     monkeypatch.setattr(
         "api.auth_oidc.complete_authorization_code_flow",
         fake_complete_authorization_code_flow,
     )
-    monkeypatch.setattr(auth, "create_session", lambda: "session-token.signature")
+    def fake_create_session(**kwargs):
+        captured["session"] = kwargs
+        return "session-token.signature"
+
+    monkeypatch.setattr(auth, "create_session", fake_create_session)
 
     handler = RouteFakeHandler()
     routes.handle_get(
@@ -142,6 +151,11 @@ def test_oidc_callback_exchanges_code_and_sets_existing_session_cookie(monkeypat
         "request_base_url": "http://localhost:8787",
         "state": "state-token",
         "code": "code-token",
+        "session": {
+            "auth_type": "oidc",
+            "username": "owner@example.com",
+            "bound_profile": "store_alpha",
+        },
     }
     assert handler.header_values("Location") == ["/chat/123"]
     cookie_headers = handler.header_values("Set-Cookie")

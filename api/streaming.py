@@ -18116,6 +18116,7 @@ def _run_agent_streaming(
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
                 if s.messages:
+                    _report_turn_usage = False
                     _checkpoint_at = _active_turn_checkpoint_index(
                         s.messages, _active_turn_identity
                     )
@@ -18161,7 +18162,26 @@ def _run_agent_streaming(
                                     'cache_write_tokens': turn_cache_write_tokens,
                                     'cache_hit_percent': turn_cache_hit_percent,
                                 }
+                                _report_turn_usage = bool(turn_input_tokens or turn_output_tokens)
                             break
+                    if _report_turn_usage:
+                        try:
+                            from api.usage_reporting import enqueue_turn_usage
+                            _usage_profile = str(getattr(s, 'profile', None) or 'default')
+                            _usage_turn_id = str(
+                                _active_turn_identity.get('turn_id')
+                                or _active_turn_identity.get('token')
+                                or stream_id
+                            )
+                            enqueue_turn_usage(
+                                profile=_usage_profile,
+                                turn_id=_usage_turn_id,
+                                input_tokens=turn_input_tokens,
+                                output_tokens=turn_output_tokens,
+                                model=_used_model or model,
+                            )
+                        except Exception:
+                            logger.debug("Failed to queue CRM usage report", exc_info=True)
                     if _checkpoint_at is not None:
                         _backfill_turn_gateway_routing(
                             s.messages,
