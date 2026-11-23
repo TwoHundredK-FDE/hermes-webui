@@ -110,6 +110,40 @@ def test_oidc_start_redirects_with_pkce_state_and_nonce(monkeypatch):
     assert params["code_challenge_method"] == ["S256"]
 
 
+def test_google_oidc_redirect_requests_the_configured_mfa_claim(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    monkeypatch.setattr(
+        auth_oidc,
+        "_require_oidc_config",
+        lambda: {
+            "issuer": "https://accounts.google.com",
+            "client_id": "webui-client",
+            "redirect_uri": "https://hermes.twohundredk.com/api/auth/oidc/callback",
+            "scopes": ["openid", "profile", "email"],
+            "mfa_claim": "amr",
+        },
+    )
+    monkeypatch.setattr(
+        auth_oidc,
+        "_get_discovery_document",
+        lambda _issuer: {
+            "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+        },
+    )
+
+    redirect = auth_oidc.build_authorization_redirect(
+        "https://hermes.twohundredk.com",
+        "/",
+    )
+    params = parse_qs(urlparse(redirect).query)
+
+    assert params["scope"] == ["openid profile email"]
+    assert json.loads(params["claims"][0]) == {
+        "id_token": {"amr": {"essential": True}},
+    }
+
+
 def test_oidc_callback_exchanges_code_and_sets_existing_session_cookie(monkeypatch):
     import api.auth as auth
     import api.routes as routes
