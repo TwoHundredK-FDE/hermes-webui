@@ -18551,6 +18551,8 @@ def handle_get(handler, parsed) -> bool:
             auth_type="oidc",
             username=str(result.get("email") or result.get("subject") or "oidc-user"),
             bound_profile=result.get("bound_profile"),
+            role=result.get("role"),
+            mfa_verified=result.get("mfa_verified") is True,
         )
         handler.send_response(302)
         handler.send_header(
@@ -18604,6 +18606,8 @@ def handle_get(handler, parsed) -> bool:
             payload["user"] = session_info.get("username") or session_info.get("email")
             if session_info.get("bound_profile"):
                 payload["bound_profile"] = session_info.get("bound_profile")
+            if session_info.get("role"):
+                payload["role"] = session_info.get("role")
         return j(handler, payload)
 
     if parsed.path.startswith("/api/share/"):
