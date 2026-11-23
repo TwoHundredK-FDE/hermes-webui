@@ -465,6 +465,53 @@ def test_profile_switch_accepts_bound_profile(monkeypatch):
     assert any(value.startswith("hermes_profile=") for value in handler.header_values("Set-Cookie"))
 
 
+def test_bound_session_only_sees_its_profile(monkeypatch):
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="store-owner@example.com",
+        bound_profile="store_alpha",
+    )
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    monkeypatch.setattr("api.profiles.list_profiles_api", lambda: [
+        {"name": "store_alpha"},
+        {"name": "store_beta"},
+    ])
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "store_alpha")
+    monkeypatch.setattr("api.profiles._is_isolated_profile_mode", lambda: False)
+
+    routes.handle_get(handler, SimpleNamespace(path="/api/profiles", query=""))
+
+    payload = handler.json_body()
+    assert handler.status == 200
+    assert [row["name"] for row in payload["profiles"]] == ["store_alpha"]
+    assert payload["active"] == "store_alpha"
+    assert payload["single_profile_mode"] is True
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/profile/create", {"name": "store_gamma"}),
+        ("/api/profile/delete", {"name": "store_beta"}),
+    ],
+)
+def test_bound_session_cannot_create_or_delete_profiles(monkeypatch, path, body):
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="store-owner@example.com",
+        bound_profile="store_alpha",
+    )
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+    handler.command = "POST"
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+
+    routes.handle_post(handler, SimpleNamespace(path=path, query=""))
+
+    assert handler.status == 403
+    assert "Profile-bound sessions" in handler.json_body()["error"]
+
+
 def test_auth_status_reports_trusted_session_fields(monkeypatch):
     _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"hermes_devops": "devops"})
     cookie = auth.create_session(
