@@ -5,7 +5,7 @@ from api import usage_reporting
 
 
 def _configure_usage_reporting(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_WEBUI_USAGE_INGEST_URL", "https://twohundredk.com/api/v1/platform/usage/events")
+    monkeypatch.setenv("HERMES_WEBUI_USAGE_INGEST_URL", "https://crm.example.test/api/v1/platform/usage/events")
     monkeypatch.setenv("HERMES_WEBUI_USAGE_PROFILE_MAP", json.dumps({"store-a": {"tenantSlug": "store-a", "apiKey": "tenant-test-key"}}))
     monkeypatch.setenv("HERMES_WEBUI_USAGE_OUTBOX_PATH", str(tmp_path / "outbox.sqlite3"))
 
@@ -49,12 +49,12 @@ def test_usage_outbox_is_idempotent_and_retries_until_worker_accepts(monkeypatch
 
 
 def test_usage_export_rejects_non_https_or_wrong_endpoint(monkeypatch):
-    monkeypatch.setenv("HERMES_WEBUI_USAGE_INGEST_URL", "http://twohundredk.com/api/v1/platform/usage/events")
+    monkeypatch.setenv("HERMES_WEBUI_USAGE_INGEST_URL", "http://crm.example.test/api/v1/platform/usage/events")
     monkeypatch.setenv("HERMES_WEBUI_USAGE_PROFILE_MAP", json.dumps({"store-a": {"tenantSlug": "store-a", "apiKey": "tenant-test-key"}}))
     assert usage_reporting.build_usage_batch(
         profile="store-a", turn_id="turn-1", input_tokens=1, output_tokens=1
     ) is None
-    monkeypatch.setenv("HERMES_WEBUI_USAGE_INGEST_URL", "https://twohundredk.com/redirect")
+    monkeypatch.setenv("HERMES_WEBUI_USAGE_INGEST_URL", "https://crm.example.test/redirect")
     assert usage_reporting.build_usage_batch(
         profile="store-a", turn_id="turn-1", input_tokens=1, output_tokens=1
     ) is None
