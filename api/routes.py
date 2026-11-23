@@ -84,6 +84,27 @@ from api.shares import (
 logger = logging.getLogger(__name__)
 
 
+def _profile_bound_session(handler):
+    """Return the authenticated profile binding, if this request has one.
+
+    Profile-bound SSO is a tenant boundary: profile administration and profile
+    discovery must be enforced by the API even when a client bypasses the UI.
+    """
+    try:
+        from api.auth import ensure_trusted_auth_session
+
+        info = ensure_trusted_auth_session(handler)
+    except Exception:
+        logger.exception("Could not resolve profile-bound auth session")
+        # Distinguish an unresolved identity from a verified unbound session;
+        # callers must not turn an auth lookup failure into broader access.
+        return False
+    if not info:
+        return None
+    name = str(info.get("bound_profile") or "").strip()
+    return name or None
+
+
 def _publish_session_list_changed(
     reason: str,
     *,
@@ -19682,12 +19703,27 @@ def handle_get(handler, parsed) -> bool:
             diag.stage("active_profile_lookup") if diag else None
             active = profiles_api.get_active_profile_name()
             diag.stage("isolated_mode_check") if diag else None
+            bound_profile = _profile_bound_session(handler)
+            single_profile_mode = _is_isolated_profile_mode()
+            if bound_profile is False:
+                profiles_payload = []
+                single_profile_mode = True
+            elif bound_profile:
+                from api.profiles import _profiles_match
+
+                profiles_payload = [
+                    row for row in profiles_payload
+                    if _profiles_match(row.get("name"), bound_profile)
+                ]
+                # A profile-bound identity is always presented as a single
+                # tenant, even when the WebUI process hosts other profiles.
+                single_profile_mode = True
             return j(
                 handler,
                 {
                     "profiles": profiles_payload,
                     "active": active,
-                    "single_profile_mode": _is_isolated_profile_mode(),
+                    "single_profile_mode": single_profile_mode,
                 },
             )
         finally:
@@ -22686,6 +22722,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 409)
 
     if parsed.path == "/api/profile/create":
+        if _profile_bound_session(handler) is not None:
+            return bad(handler, "Profile-bound sessions cannot create profiles", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -22726,6 +22764,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
 
     if parsed.path == "/api/profile/delete":
+        if _profile_bound_session(handler) is not None:
+            return bad(handler, "Profile-bound sessions cannot delete profiles", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
