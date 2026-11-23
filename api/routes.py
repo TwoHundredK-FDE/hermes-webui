@@ -20621,6 +20621,23 @@ def handle_post(handler, parsed) -> bool:
         requested_profile, requested_profile_invalid = _new_session_requested_profile(body)
         if requested_profile_invalid:
             return bad(handler, "invalid profile", 400)
+        # A client may name the profile for a new session, but a profile-bound
+        # SSO identity (or a dedicated isolated-profile deployment) must not
+        # use that field to select another tenant's workspace. Enforce this
+        # before resolving workspaces, creating worktrees, or writing session
+        # state. The UI hides profile switching; this is the API boundary.
+        bound_profile = _profile_bound_session(handler)
+        if bound_profile is False:
+            return bad(handler, "Unable to resolve the authenticated profile", 403)
+        expected_profile = bound_profile
+        if expected_profile is None and _is_isolated_profile_mode():
+            expected_profile = _get_active_profile_name()
+        if (
+            expected_profile
+            and requested_profile
+            and not _profiles_match(requested_profile, expected_profile)
+        ):
+            return bad(handler, "Profile is bound to the current session", 403)
         # Stage timers: one [SLOW] line (same 2s threshold / _safe_webui_print
         # route as GET /api/session) so tail latency can be attributed.
         _sn_t0 = time.monotonic()

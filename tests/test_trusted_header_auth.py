@@ -489,6 +489,34 @@ def test_bound_session_only_sees_its_profile(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("bound_profile", "isolated_mode"),
+    [("store_alpha", False), (None, True)],
+)
+def test_bound_or_isolated_session_cannot_create_session_in_another_profile(
+    monkeypatch, bound_profile, isolated_mode
+):
+    handler = _Handler()
+    handler.command = "POST"
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"profile": "store_beta"})
+    monkeypatch.setattr(routes, "_profile_bound_session", lambda _handler: bound_profile)
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: isolated_mode)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "store_alpha")
+    monkeypatch.setattr(
+        routes,
+        "_resolve_new_session_workspace",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("foreign profile workspace must not be resolved")
+        ),
+    )
+
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/new", query=""))
+
+    assert handler.status == 403
+    assert handler.json_body()["error"] == "Profile is bound to the current session"
+
+
+@pytest.mark.parametrize(
     ("path", "body"),
     [
         ("/api/profile/create", {"name": "store_gamma"}),
