@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils
 
 from api.config import get_config
+from api.profile_tool_policy import parse_profile_toolsets
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +69,22 @@ class OIDCAuthError(Exception):
 
 def is_oidc_enabled() -> bool:
     cfg = _resolve_oidc_config()
-    return bool(
+    enabled = bool(
         cfg.get("issuer")
         and cfg.get("client_id")
         and cfg.get("allow_claim")
         and cfg.get("allow_values")
     )
+    if not enabled:
+        return False
+    profile_claim = bool(cfg.get("profile_claim"))
+    profile_map = cfg.get("profile_map") or {}
+    if profile_claim != bool(profile_map):
+        return False
+    if profile_map:
+        policy = cfg.get("profile_toolsets") or {}
+        return set(profile_map.values()).issubset(policy)
+    return True
 
 
 def build_authorization_redirect(
@@ -209,6 +220,11 @@ def _resolve_oidc_config() -> dict[str, Any]:
         and str(claim_value).strip()
         and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", str(profile).strip())
     }
+    # Keep this policy in the WebUI service environment so tenant profile
+    # configuration cannot broaden its own tool access.
+    profile_toolsets = parse_profile_toolsets(
+        os.getenv("HERMES_WEBUI_OIDC_PROFILE_TOOLSETS")
+    )
     if (
         raw_allow is not None
         and not isinstance(raw_allow, (list, tuple, set))
@@ -228,6 +244,7 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "allow_values": allow_values,
         "profile_claim": str(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM") or "").strip(),
         "profile_map": profile_map,
+        "profile_toolsets": profile_toolsets or {},
         "token_auth_method": _normalize_token_auth_method(
             pick("token_auth_method", "HERMES_WEBUI_OIDC_TOKEN_AUTH_METHOD")
         ),
@@ -245,6 +262,12 @@ def _require_oidc_config() -> dict[str, Any]:
     if bool(cfg.get("profile_claim")) != bool(cfg.get("profile_map")):
         raise OIDCConfigError(
             "Native OIDC profile binding requires both webui_oidc.profile_claim and profile_map"
+        )
+    required_profiles = set((cfg.get("profile_map") or {}).values())
+    configured_profiles = set((cfg.get("profile_toolsets") or {}).keys())
+    if required_profiles - configured_profiles:
+        raise OIDCConfigError(
+            "Profile-bound OIDC requires webui_oidc.profile_toolsets for every mapped profile"
         )
     return cfg
 

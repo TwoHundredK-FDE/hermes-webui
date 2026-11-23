@@ -8867,6 +8867,13 @@ def _embedded_terminal_gate_allows(handler) -> bool:
     A deliberately-exposed passwordless server (access secured at another layer)
     opts out with ``HERMES_WEBUI_ONBOARDING_OPEN=1``.
     """
+    # A profile-bound SSO session represents a tenant owner in a shared
+    # deployment. Even though that owner is authenticated, a PTY would grant
+    # arbitrary commands as the shared Hermes service account and cross the
+    # tenant boundary. Keep the terminal for unbound operator sessions only.
+    bound_profile = _profile_bound_session(handler)
+    if bound_profile is not None:
+        return False
     return _onboarding_gate_allows(handler)
 
 
