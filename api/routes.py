@@ -18435,7 +18435,8 @@ def handle_get(handler, parsed) -> bool:
         # the server — every submit. The OIDC SSO entry point stays the
         # sole path. ``is_password_auth_enabled`` is the same predicate
         # ``/api/auth/status`` reports as ``password_auth_enabled``.
-        from api.auth import are_passkeys_enabled, is_password_auth_enabled
+        from api.auth import are_passkeys_enabled, is_oidc_profile_binding_enabled, is_password_auth_enabled
+        _profile_bound_sso = is_oidc_profile_binding_enabled()
 
         # The password INPUT is gated on a configured password, but the passkey
         # button must survive a passwordless-passkey deployment: settings expose
@@ -18447,14 +18448,14 @@ def handle_get(handler, parsed) -> bool:
             '<button type="button" id="passkey-login" class="passkey-login" '
             'style="display:none">Sign in with passkey</button>'
         )
-        if is_password_auth_enabled():
+        if not _profile_bound_sso and is_password_auth_enabled():
             _password_form_html = (
                 f'<input type="password" id="pw" '
                 f'placeholder="{_html.escape(_login_strings["placeholder"])}" autofocus>'
                 f'<button type="submit">{_html.escape(_login_strings["btn"])}</button>'
                 f'{_passkey_button_html}'
             )
-        elif are_passkeys_enabled():
+        elif not _profile_bound_sso and are_passkeys_enabled():
             _password_form_html = _passkey_button_html
         else:
             _password_form_html = ""
@@ -18539,9 +18540,10 @@ def handle_get(handler, parsed) -> bool:
         from api.auth import (
             _passkey_feature_flag_enabled,
             ensure_trusted_auth_session,
-            get_password_hash,
             is_auth_enabled,
             is_oidc_auth_enabled,
+            is_oidc_profile_binding_enabled,
+            is_password_auth_enabled,
             is_trusted_auth_enabled,
         )
         from api.passkeys import registered_credentials
@@ -18555,7 +18557,7 @@ def handle_get(handler, parsed) -> bool:
             logged_in = bool(session_info)
         passkey_flag = _passkey_feature_flag_enabled()
         passkeys = registered_credentials() if passkey_flag else []
-        password_auth_enabled = get_password_hash() is not None
+        password_auth_enabled = is_password_auth_enabled()
         payload = {
             "auth_enabled": auth_enabled,
             "logged_in": logged_in,
@@ -24055,11 +24057,14 @@ def handle_post(handler, parsed) -> bool:
             create_session,
             set_auth_cookie,
             is_auth_enabled,
+            is_oidc_profile_binding_enabled,
         )
         from api.auth import _check_login_rate, _record_login_attempt, _clear_login_attempts
 
         if not is_auth_enabled():
             return j(handler, {"ok": True, "message": "Auth not enabled"})
+        if is_oidc_profile_binding_enabled():
+            return j(handler, {"error": "Profile-bound SSO is required"}, status=403)
         client_ip = _login_client_ip(handler)
         if not _check_login_rate(client_ip):
             return j(
@@ -24085,13 +24090,15 @@ def handle_post(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/auth/passkey/options":
-        from api.auth import _passkey_feature_flag_enabled, is_auth_enabled
+        from api.auth import _passkey_feature_flag_enabled, is_auth_enabled, is_oidc_profile_binding_enabled
         from api.passkeys import PasskeyError, PasskeyRateLimitError, authentication_options
 
-        if not _passkey_feature_flag_enabled():
-            return j(handler, {"error": "Passkey support is disabled. Set HERMES_WEBUI_PASSKEY=1 or webui_passkey_enabled: true to enable."}, status=404)
         if not is_auth_enabled():
             return j(handler, {"error": "Auth not enabled"}, status=400)
+        if is_oidc_profile_binding_enabled():
+            return j(handler, {"error": "Profile-bound SSO is required"}, status=403)
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled. Set HERMES_WEBUI_PASSKEY=1 or webui_passkey_enabled: true to enable."}, status=404)
         try:
             return j(handler, {"ok": True, "publicKey": authentication_options(handler)})
         except PasskeyRateLimitError as e:
@@ -24100,14 +24107,16 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), status=400)
 
     if parsed.path == "/api/auth/passkey/login":
-        from api.auth import _passkey_feature_flag_enabled, create_session, is_auth_enabled, set_auth_cookie
+        from api.auth import _passkey_feature_flag_enabled, create_session, is_auth_enabled, is_oidc_profile_binding_enabled, set_auth_cookie
         from api.auth import _check_login_rate, _record_login_attempt
         from api.passkeys import PasskeyError, finish_login
 
-        if not _passkey_feature_flag_enabled():
-            return j(handler, {"error": "Passkey support is disabled."}, status=404)
         if not is_auth_enabled():
             return j(handler, {"error": "Auth not enabled"}, status=400)
+        if is_oidc_profile_binding_enabled():
+            return j(handler, {"error": "Profile-bound SSO is required"}, status=403)
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled."}, status=404)
         client_ip = _login_client_ip(handler)
         if not _check_login_rate(client_ip):
             return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
