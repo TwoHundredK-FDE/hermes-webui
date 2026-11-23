@@ -488,6 +488,10 @@ def test_bound_session_only_sees_its_profile(monkeypatch):
     assert payload["single_profile_mode"] is True
 
 
+def test_internal_handler_without_headers_is_unbound():
+    assert routes._profile_bound_session(SimpleNamespace()) is None
+
+
 @pytest.mark.parametrize(
     ("bound_profile", "isolated_mode"),
     [("store_alpha", False), (None, True)],

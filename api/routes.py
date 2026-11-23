@@ -90,6 +90,11 @@ def _profile_bound_session(handler):
     Profile-bound SSO is a tenant boundary: profile administration and profile
     discovery must be enforced by the API even when a client bypasses the UI.
     """
+    # Internal/test handlers without an HTTP header collection cannot carry a
+    # browser session or trusted identity. Treat those as unbound; if headers
+    # are present but identity resolution fails, retain the fail-closed result.
+    if not getattr(handler, "headers", None):
+        return None
     try:
         from api.auth import ensure_trusted_auth_session
 
