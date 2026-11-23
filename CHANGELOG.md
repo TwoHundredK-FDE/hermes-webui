@@ -39,6 +39,8 @@
 
 ### Fixed
 
+- **Switching chats while a message is still being sent no longer hands that message to the chat you switched to (#9284, refs #9237).** The turn now stays with the chat that sent it, with that chat's model, workspace and profile, and the chat you moved to is left as it was. If the send then fails to start after you have moved away, its text is saved in its own chat as a draft and a short notice names that chat. A chat that is still busy queues the message and takes you back to it, as before, and sending while you stay on the chat is unchanged.
+
 - **A reply is no longer lost when the Agent shortens an old tool result to save space (#9286, refs #9233).** When the Agent's cold-cache pruning replaced an earlier tool output with a short placeholder, WebUI could no longer prove the new turn extended the saved conversation and refused to keep the reply. WebUI now restores its own full copy of that tool row before the check, so the reply is kept; any other difference is still refused as before.
 
 - **A public share page no longer hides part of a message (#9214).** Some messages contained text the page left out without any sign: an HTML comment, an attribute value the renderer drops, or angle-bracket text such as `git checkout <branch-name>` or a traceback's `File "<stdin>", line 1, in <module>`. Anyone reading the published snapshot's source could still see it. When the rendered message would leave out any of its words, the share page now shows that message as plain text, with a short note, so every word is visible. Messages the page shows in full render as before. A few formatting-only shapes also fall back to plain text although nothing in them is hidden; they're listed in the PR and tracked in #9267.
