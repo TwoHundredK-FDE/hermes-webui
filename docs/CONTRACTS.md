@@ -23,6 +23,11 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/tenant-profile-boundary.md`](tenant-profile-boundary.md): SSO session
+  profile ownership boundary for shared WebUI deployments, including profile
+  discovery and mutation rules and the limits of this contract. Start here
+  before changing profile-bound authentication or tenant access.
+
 - [`docs/architecture/model-picker-routing.md`](architecture/model-picker-routing.md):
   current contract for provider-scoped model identity, exact OpenRouter route
   matching, overflow promotion, routed fallback, and selected-row rendering.

@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import socket
 import threading
@@ -20,6 +21,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils
 
 from api.config import get_config
+from api.profile_tool_policy import parse_profile_toolsets
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +69,32 @@ class OIDCAuthError(Exception):
 
 def is_oidc_enabled() -> bool:
     cfg = _resolve_oidc_config()
-    return bool(
+    enabled = bool(
         cfg.get("issuer")
         and cfg.get("client_id")
         and cfg.get("allow_claim")
         and cfg.get("allow_values")
     )
+    if not enabled:
+        return False
+    profile_claim = bool(cfg.get("profile_claim"))
+    profile_map = cfg.get("profile_map") or {}
+    if profile_claim != bool(profile_map):
+        return False
+    role_claim = bool(cfg.get("role_claim"))
+    role_map = cfg.get("role_map") or {}
+    if role_claim != bool(role_map):
+        return False
+    mfa_claim = bool(cfg.get("mfa_claim"))
+    mfa_values = cfg.get("mfa_values") or []
+    if mfa_claim != bool(mfa_values):
+        return False
+    if profile_map:
+        policy = cfg.get("profile_toolsets") or {}
+        return (set(profile_map.values()).issubset(policy) and role_claim
+                and set(role_map.values()).issubset({"owner", "viewer"})
+                and mfa_claim and bool(mfa_values))
+    return True
 
 
 def build_authorization_redirect(
@@ -162,10 +184,20 @@ def complete_authorization_code_flow(
         allow_claim=cfg.get("allow_claim"),
         allow_values=cfg.get("allow_values") or [],
     )
+    bound_profile = _resolve_bound_profile(
+        claims,
+        profile_claim=cfg.get("profile_claim", ""),
+        profile_map=cfg.get("profile_map") or {},
+    )
+    role = _resolve_role(claims, role_claim=cfg.get("role_claim", ""), role_map=cfg.get("role_map") or {})
+    mfa_verified = _resolve_mfa(claims, mfa_claim=cfg.get("mfa_claim", ""), mfa_values=cfg.get("mfa_values") or [])
     return {
         "next_path": pending["next_path"],
         "subject": str(claims.get("sub") or ""),
         "email": str(claims.get("email") or ""),
+        "bound_profile": bound_profile,
+        "role": role,
+        "mfa_verified": mfa_verified,
         "claims": claims,
     }
 
@@ -187,6 +219,42 @@ def _resolve_oidc_config() -> dict[str, Any]:
     scopes = _normalize_scopes(pick("scopes", "HERMES_WEBUI_OIDC_SCOPES"))
     raw_allow = pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES")
     allow_values = _normalize_allow_values(raw_allow)
+    raw_profile_map = pick("profile_map", "HERMES_WEBUI_OIDC_PROFILE_MAP")
+    if isinstance(raw_profile_map, str):
+        try:
+            raw_profile_map = json.loads(raw_profile_map)
+        except (TypeError, ValueError):
+            raw_profile_map = None
+    profile_map = raw_profile_map if isinstance(raw_profile_map, dict) else {}
+    profile_map = {
+        str(claim_value).strip(): str(profile).strip()
+        for claim_value, profile in profile_map.items()
+        if isinstance(claim_value, str)
+        and isinstance(profile, str)
+        and str(claim_value).strip()
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", str(profile).strip())
+    }
+    raw_role_map = pick("role_map", "HERMES_WEBUI_OIDC_ROLE_MAP")
+    if isinstance(raw_role_map, str):
+        try:
+            raw_role_map = json.loads(raw_role_map)
+        except (TypeError, ValueError):
+            raw_role_map = None
+    role_map = raw_role_map if isinstance(raw_role_map, dict) else {}
+    role_map = {
+        str(claim_value).strip(): str(role).strip().lower()
+        for claim_value, role in role_map.items()
+        if isinstance(claim_value, str)
+        and isinstance(role, str)
+        and str(claim_value).strip()
+        and str(role).strip().lower() in {"owner", "viewer"}
+    }
+    mfa_values = _normalize_allow_values(pick("mfa_values", "HERMES_WEBUI_OIDC_MFA_VALUES"))
+    # Keep this policy in the WebUI service environment so tenant profile
+    # configuration cannot broaden its own tool access.
+    profile_toolsets = parse_profile_toolsets(
+        os.getenv("HERMES_WEBUI_OIDC_PROFILE_TOOLSETS")
+    )
     if (
         raw_allow is not None
         and not isinstance(raw_allow, (list, tuple, set))
@@ -204,6 +272,13 @@ def _resolve_oidc_config() -> dict[str, Any]:
         "scopes": scopes,
         "allow_claim": str(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM") or "").strip(),
         "allow_values": allow_values,
+        "profile_claim": str(pick("profile_claim", "HERMES_WEBUI_OIDC_PROFILE_CLAIM") or "").strip(),
+        "profile_map": profile_map,
+        "profile_toolsets": profile_toolsets or {},
+        "role_claim": str(pick("role_claim", "HERMES_WEBUI_OIDC_ROLE_CLAIM") or "").strip(),
+        "role_map": role_map,
+        "mfa_claim": str(pick("mfa_claim", "HERMES_WEBUI_OIDC_MFA_CLAIM") or "").strip(),
+        "mfa_values": mfa_values,
         "token_auth_method": _normalize_token_auth_method(
             pick("token_auth_method", "HERMES_WEBUI_OIDC_TOKEN_AUTH_METHOD")
         ),
@@ -218,7 +293,69 @@ def _require_oidc_config() -> dict[str, Any]:
         raise OIDCConfigError(
             "Native OIDC login requires webui_oidc.allow_claim and allow_values"
         )
+    if bool(cfg.get("profile_claim")) != bool(cfg.get("profile_map")):
+        raise OIDCConfigError(
+            "Native OIDC profile binding requires both webui_oidc.profile_claim and profile_map"
+        )
+    if bool(cfg.get("role_claim")) != bool(cfg.get("role_map")):
+        raise OIDCConfigError("Native OIDC role mapping requires both webui_oidc.role_claim and role_map")
+    if bool(cfg.get("mfa_claim")) != bool(cfg.get("mfa_values")):
+        raise OIDCConfigError("Native OIDC MFA verification requires both webui_oidc.mfa_claim and mfa_values")
+    required_profiles = set((cfg.get("profile_map") or {}).values())
+    configured_profiles = set((cfg.get("profile_toolsets") or {}).keys())
+    if required_profiles - configured_profiles:
+        raise OIDCConfigError(
+            "Profile-bound OIDC requires webui_oidc.profile_toolsets for every mapped profile"
+        )
+    if cfg.get("profile_map") and not cfg.get("role_map"):
+        raise OIDCConfigError("Profile-bound OIDC requires webui_oidc.role_claim and role_map")
+    if cfg.get("profile_map") and not cfg.get("mfa_values"):
+        raise OIDCConfigError("Profile-bound OIDC requires webui_oidc.mfa_claim and mfa_values")
+    if cfg.get("role_map") and not set(cfg["role_map"].values()).issubset({"owner", "viewer"}):
+        raise OIDCConfigError("Native OIDC role_map may contain only owner and viewer roles")
     return cfg
+
+
+def _resolve_bound_profile(
+    claims: dict[str, Any], *, profile_claim: str, profile_map: dict[str, str]
+) -> str | None:
+    """Map one exact OIDC claim value to one WebUI profile, failing closed on ambiguity."""
+    if not profile_claim and not profile_map:
+        return None
+    if not profile_claim or not profile_map:
+        raise OIDCConfigError(
+            "Native OIDC profile binding requires both profile_claim and profile_map"
+        )
+    claim_value = _get_claim_path(claims, profile_claim)
+    mapped = {_profile for value in _claim_values(claim_value) if (_profile := profile_map.get(value))}
+    if len(mapped) != 1:
+        raise OIDCAuthError("OIDC identity is not assigned to exactly one profile", status_code=403)
+    return next(iter(mapped))
+
+
+def _resolve_role(claims: dict[str, Any], *, role_claim: str, role_map: dict[str, str]) -> str | None:
+    """Map one exact OIDC group claim to a least-surprise WebUI role."""
+    if not role_claim and not role_map:
+        return None
+    if not role_claim or not role_map:
+        raise OIDCConfigError("Native OIDC role mapping requires both role_claim and role_map")
+    claim_value = _get_claim_path(claims, role_claim)
+    mapped = {role for value in _claim_values(claim_value) if (role := role_map.get(value))}
+    if len(mapped) != 1:
+        raise OIDCAuthError("OIDC identity is not assigned exactly one WebUI role", status_code=403)
+    return next(iter(mapped))
+
+
+def _resolve_mfa(claims: dict[str, Any], *, mfa_claim: str, mfa_values: list[str]) -> bool:
+    """Require an exact IdP-asserted MFA value for shared profile logins."""
+    if not mfa_claim and not mfa_values:
+        return False
+    if not mfa_claim or not mfa_values:
+        raise OIDCConfigError("Native OIDC MFA verification requires both mfa_claim and mfa_values")
+    claim_value = _get_claim_path(claims, mfa_claim)
+    if not (_claim_values(claim_value) & set(mfa_values)):
+        raise OIDCAuthError("OIDC identity did not satisfy the required MFA policy", status_code=403)
+    return True
 
 
 def _normalize_token_auth_method(raw: Any) -> str:

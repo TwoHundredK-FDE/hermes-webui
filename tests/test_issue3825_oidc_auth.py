@@ -120,13 +120,24 @@ def test_oidc_callback_exchanges_code_and_sets_existing_session_cookie(monkeypat
         captured["request_base_url"] = request_base_url
         captured["state"] = state
         captured["code"] = code
-        return {"next_path": "/chat/123"}
+        return {
+            "next_path": "/chat/123",
+            "subject": "oidc-subject",
+            "email": "owner@example.com",
+            "bound_profile": "store_alpha",
+            "role": "viewer",
+            "mfa_verified": True,
+        }
 
     monkeypatch.setattr(
         "api.auth_oidc.complete_authorization_code_flow",
         fake_complete_authorization_code_flow,
     )
-    monkeypatch.setattr(auth, "create_session", lambda: "session-token.signature")
+    def fake_create_session(**kwargs):
+        captured["session"] = kwargs
+        return "session-token.signature"
+
+    monkeypatch.setattr(auth, "create_session", fake_create_session)
 
     handler = RouteFakeHandler()
     routes.handle_get(
@@ -142,6 +153,13 @@ def test_oidc_callback_exchanges_code_and_sets_existing_session_cookie(monkeypat
         "request_base_url": "http://localhost:8787",
         "state": "state-token",
         "code": "code-token",
+        "session": {
+            "auth_type": "oidc",
+            "username": "owner@example.com",
+            "bound_profile": "store_alpha",
+                "role": "viewer",
+                "mfa_verified": True,
+        },
     }
     assert handler.header_values("Location") == ["/chat/123"]
     cookie_headers = handler.header_values("Set-Cookie")
@@ -228,6 +246,32 @@ def test_auth_status_reports_oidc_capability_without_regressing_passkey_fields(m
         "passkey_feature_flag": False,
         "auth_disabled_acknowledged": False,
     }
+
+
+def test_auth_status_exposes_server_mapped_profile_role(monkeypatch):
+    import api.auth as auth
+    import api.passkeys as passkeys
+    import api.routes as routes
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_oidc_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_oidc_profile_binding_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_trusted_auth_enabled", lambda: False)
+    monkeypatch.setattr(auth, "is_password_auth_enabled", lambda: False)
+    monkeypatch.setattr(auth, "_passkey_feature_flag_enabled", lambda: False)
+    monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda _handler: {
+        "auth_type": "oidc", "username": "viewer@example.com",
+        "bound_profile": "shop_a", "role": "viewer",
+    })
+    monkeypatch.setattr(passkeys, "registered_credentials", lambda: [])
+
+    handler = RouteFakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/auth/status"))
+
+    payload = handler.json_body()
+    assert payload["role"] == "viewer"
+    assert payload["bound_profile"] == "shop_a"
+    assert payload["user"] == "viewer@example.com"
 
 
 def test_login_page_renders_absolute_oidc_href_when_enabled(monkeypatch):
