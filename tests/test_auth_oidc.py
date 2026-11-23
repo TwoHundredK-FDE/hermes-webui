@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import api.auth_oidc as auth_oidc
-from api.auth_oidc import _enforce_allowlist, _normalize_allow_values, OIDCAuthError
+from api.auth_oidc import _enforce_allowlist, _normalize_allow_values, _resolve_bound_profile, OIDCAuthError
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +23,8 @@ def _clear_oidc_environment(monkeypatch):
         "HERMES_WEBUI_OIDC_CLIENT_ID",
         "HERMES_WEBUI_OIDC_ALLOW_CLAIM",
         "HERMES_WEBUI_OIDC_ALLOW_VALUES",
+        "HERMES_WEBUI_OIDC_PROFILE_CLAIM",
+        "HERMES_WEBUI_OIDC_PROFILE_MAP",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -157,6 +159,7 @@ def test_enforce_decisions_unchanged(monkeypatch):
             allow_values=["alice@example.com", "bob@example.com"],
         )
 
+
     # absent claim → denied
     with pytest.raises(OIDCAuthError):
         _enforce_allowlist(
@@ -181,6 +184,28 @@ def test_enforce_decisions_unchanged(monkeypatch):
             allow_claim="email",
             allow_values=combined_values,
         )
+
+
+def test_oidc_profile_binding_requires_one_exact_store_profile():
+    mapping = {"store:alpha": "store_alpha", "store:beta": "store_beta"}
+    assert _resolve_bound_profile(
+        {"groups": ["general", "store:alpha"]},
+        profile_claim="groups",
+        profile_map=mapping,
+    ) == "store_alpha"
+    with pytest.raises(OIDCAuthError, match="exactly one profile"):
+        _resolve_bound_profile(
+            {"groups": ["store:alpha", "store:beta"]},
+            profile_claim="groups",
+            profile_map=mapping,
+        )
+    with pytest.raises(OIDCAuthError, match="exactly one profile"):
+        _resolve_bound_profile(
+            {"groups": ["general"]}, profile_claim="groups", profile_map=mapping
+        )
+    assert _resolve_bound_profile(
+        {"email": "owner@example.com"}, profile_claim="", profile_map={}
+    ) is None
 
 
 # ---------------------------------------------------------------------------

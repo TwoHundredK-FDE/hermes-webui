@@ -376,6 +376,23 @@ def test_bound_profile_match_allowed(monkeypatch):
     assert handler.status is None
 
 
+def test_native_oidc_session_is_forced_into_its_bound_profile(monkeypatch):
+    _trusted_env(monkeypatch, header=None)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    cookie = auth.create_session(
+        auth_type="oidc",
+        username="owner@example.com",
+        bound_profile="store_alpha",
+    )
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+
+    result = auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query=""))
+
+    assert result is True
+    assert profiles.get_active_profile_name() == "store_alpha"
+    assert any("hermes_profile=store_alpha" in value for value in handler._pending_set_cookies)
+
+
 def test_profile_switch_rejects_other_bound_profile(monkeypatch):
     cookie = auth.create_session(
         auth_type="trusted",

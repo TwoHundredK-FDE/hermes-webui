@@ -1239,6 +1239,12 @@ def check_auth(handler, parsed) -> bool:
         return False
     session_info = ensure_trusted_auth_session(handler)
     if session_info:
+        if session_info.get('auth_type') == 'oidc' and session_info.get('bound_profile'):
+            _apply_trusted_session_profile(
+                handler,
+                str(session_info.get('bound_profile')),
+                cookie_val,
+            )
         if not trusted_session_allows_active_profile(session_info):
             if parsed.path.startswith('/api/'):
                 body = b'{"error":"Profile access forbidden"}'
