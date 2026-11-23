@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -44,6 +45,7 @@ def build_usage_batch(*, profile: str, turn_id: str, input_tokens: int, output_t
     if not isinstance(api_key, str) or not api_key.strip():
         return None
     digest = hashlib.sha256(f"{profile}\0{turn_id}".encode()).hexdigest()[:40]
+    occurred_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     events = []
     for metric, quantity in (("input_tokens", input_tokens), ("output_tokens", output_tokens)):
         if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
@@ -54,6 +56,7 @@ def build_usage_batch(*, profile: str, turn_id: str, input_tokens: int, output_t
             "metric": metric,
             "quantity": quantity,
             "unit": "tokens",
+            "occurredAt": occurred_at,
             "model": str(model or "")[:160] or None,
             "metadata": {"profile": profile[:80]},
         })

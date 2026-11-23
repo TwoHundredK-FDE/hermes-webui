@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from datetime import datetime
 
 from api import usage_reporting
 
@@ -19,6 +20,9 @@ def test_usage_batch_maps_profile_and_exports_only_token_metadata(monkeypatch, t
     assert [event["metric"] for event in payload["events"]] == ["input_tokens", "output_tokens"]
     assert all(event["source"] == "hermes_webui" for event in payload["events"])
     assert all(event["model"] == "provider/model" for event in payload["events"])
+    timestamps = {event["occurredAt"] for event in payload["events"]}
+    assert len(timestamps) == 1
+    datetime.fromisoformat(timestamps.pop().replace("Z", "+00:00"))
     assert "content" not in json.dumps(payload)
     assert usage_reporting.build_usage_batch(
         profile="unmapped", turn_id="turn-2", input_tokens=1, output_tokens=1
@@ -34,11 +38,14 @@ def test_usage_outbox_is_idempotent_and_retries_until_worker_accepts(monkeypatch
     outbox = tmp_path / "outbox.sqlite3"
     with sqlite3.connect(outbox) as conn:
         assert conn.execute("SELECT COUNT(*) FROM pending_usage").fetchone()[0] == 2
+        persisted_timestamps = {json.loads(row[0])["occurredAt"] for row in conn.execute("SELECT event_json FROM pending_usage")}
+    assert len(persisted_timestamps) == 1
 
     monkeypatch.setattr(usage_reporting, "_post_batch", lambda _payload, _key: False)
     assert usage_reporting.flush_pending_usage() == {"sent": 0, "failed": 2}
     with sqlite3.connect(outbox) as conn:
         assert conn.execute("SELECT COUNT(*) FROM pending_usage WHERE attempts = 1").fetchone()[0] == 2
+        assert {json.loads(row[0])["occurredAt"] for row in conn.execute("SELECT event_json FROM pending_usage")} == persisted_timestamps
 
     monkeypatch.setattr(usage_reporting, "_post_batch", lambda payload, key: payload["tenantSlug"] == "store-a" and key == "tenant-test-key")
     with sqlite3.connect(outbox) as conn:
