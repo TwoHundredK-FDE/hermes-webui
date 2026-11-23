@@ -25,6 +25,7 @@ def _clear_oidc_environment(monkeypatch):
         "HERMES_WEBUI_OIDC_ALLOW_VALUES",
         "HERMES_WEBUI_OIDC_PROFILE_CLAIM",
         "HERMES_WEBUI_OIDC_PROFILE_MAP",
+        "HERMES_WEBUI_OIDC_PROFILE_TOOLSETS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -206,6 +207,35 @@ def test_oidc_profile_binding_requires_one_exact_store_profile():
     assert _resolve_bound_profile(
         {"email": "owner@example.com"}, profile_claim="", profile_map={}
     ) is None
+
+
+def test_tenant_oidc_requires_server_owned_toolset_policy_for_every_profile(monkeypatch):
+    from api.auth_oidc import OIDCConfigError
+
+    config = {"webui_oidc": {
+        "issuer": "https://issuer.example",
+        "client_id": "hermes-webui",
+        "allow_claim": "email",
+        "allow_values": ["owner@example.com"],
+        "profile_claim": "groups",
+        "profile_map": {"shop-a-owner": "shop_a", "shop-b-owner": "shop_b"},
+    }}
+    with patch("api.auth_oidc.get_config", return_value=config):
+        assert auth_oidc.is_oidc_enabled() is False
+        with pytest.raises(OIDCConfigError, match="profile_toolsets"):
+            auth_oidc._require_oidc_config()
+
+    monkeypatch.setenv(
+        "HERMES_WEBUI_OIDC_PROFILE_TOOLSETS",
+        '{"shop_a":["mcp-store_crm"],"shop_b":[]}',
+    )
+    with patch("api.auth_oidc.get_config", return_value=config):
+        resolved = auth_oidc._require_oidc_config()
+        assert auth_oidc.is_oidc_enabled() is True
+        assert resolved["profile_toolsets"] == {
+            "shop_a": frozenset({"mcp-store_crm"}),
+            "shop_b": frozenset(),
+        }
 
 
 def test_profile_bound_oidc_disables_shared_password_login(monkeypatch):

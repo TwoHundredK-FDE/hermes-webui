@@ -16338,6 +16338,14 @@ def _run_agent_streaming(
             except Exception as _ts_err:
                 print(f"[webui] WARNING: failed to read per-session toolsets for {session_id}: {_ts_err}", flush=True)
 
+            # Tenant profiles can receive a server-owned allowlist. Apply it
+            # after the per-session override so old sessions or UI selections
+            # cannot re-enable tools outside the profile's approved set.
+            from api.profile_tool_policy import apply_profile_toolset_policy
+            _toolsets = apply_profile_toolset_policy(
+                getattr(s, 'profile', None), _toolsets,
+            )
+
             # Fallback model chain from profile config (e.g. for rate-limit or
             # provider recovery). Match Hermes CLI/gateway semantics:
             # fallback_providers entries are tried first, then legacy
