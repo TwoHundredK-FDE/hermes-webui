@@ -59,10 +59,17 @@ with the identity provider's documented assertion values. Do not let a tenant
 profile change the mapping that grants its own login role or MFA status.
 
 For Google OIDC, use `mfa_claim: amr` and `mfa_values: [mfa]`. The WebUI
-requests a configured top-level MFA claim as essential in the ID token; Google
-also requires the `amr` claim to be enabled in OAuth settings and the account's
-MFA policy to be active. Google documents that `mfa` is present when MFA was
-used for that sign-in in its [OpenID Connect claim reference](https://developers.google.com/identity/openid-connect/openid-connect#an-id-tokens-payload).
+requests the claim as essential in the ID token, but this request alone does
+not enable it. Google's current setup requires the OAuth app to be published
+and verified, then **Authentication strength claims** to be enabled under the
+Google Auth Platform Security Bundle. The account or Workspace policy must
+also require MFA. Google may still omit `amr` when it cannot attest to the
+authentication method; the WebUI must reject that login. Before rollout, sign
+in with the actual owner account and confirm the returned, validated ID token
+contains `amr: ["mfa", ...]`. If Google's verification or claim setup cannot be
+completed, use an IdP that can reliably assert MFA rather than weakening the
+WebUI's fail-closed check. See Google's [OpenID Connect claim reference](https://developers.google.com/identity/openid-connect/openid-connect#an-id-tokens-payload)
+and [Security Bundle setup and MFA claim behavior](https://developers.google.com/identity/siwg/security-bundle).
 
 This provides an owner/viewer role boundary with a chat tool allowlist, not a
 general-purpose role system or an OS-level sandbox. It does not define separate
