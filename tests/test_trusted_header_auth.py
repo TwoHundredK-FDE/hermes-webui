@@ -642,6 +642,35 @@ def test_existing_trusted_session_without_header_is_invalidated(monkeypatch):
     assert auth.verify_session(cookie) is False
 
 
+def test_profile_bound_oidc_invalidates_existing_unbound_session(monkeypatch):
+    monkeypatch.setattr(auth, "is_oidc_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_oidc_profile_binding_enabled", lambda: True)
+    cookie = auth.create_session(username="legacy-admin")
+    handler = _Handler(headers={"Cookie": f"hermes_session={cookie}"})
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is False
+    assert handler.status == 401
+    assert handler.json_body() == {"error": "Profile-bound SSO is required"}
+    assert auth.verify_session(cookie) is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/auth/login", "/api/auth/passkey/options", "/api/auth/passkey/login"],
+)
+def test_profile_bound_oidc_rejects_unbound_login_methods(monkeypatch, path):
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "is_oidc_profile_binding_enabled", lambda: True)
+    body = b'{"password":"legacy-password"}'
+    handler = _Handler(headers={"Content-Length": str(len(body)), "Origin": "https://hermes.example"})
+    handler.command = "POST"
+    handler.rfile = io.BytesIO(body)
+
+    routes.handle_post(handler, SimpleNamespace(path=path, query=""))
+    assert handler.status == 403
+    assert handler.json_body() == {"error": "Profile-bound SSO is required"}
+
+
 def test_untrusted_existing_trusted_session_is_rejected_by_all_consumers(monkeypatch):
     _trusted_env(monkeypatch)
     headers = {"Remote-User": "alice"}

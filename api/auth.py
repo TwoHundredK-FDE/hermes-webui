@@ -439,8 +439,25 @@ def get_password_hash() -> str | None:
 
 
 def is_password_auth_enabled() -> bool:
-    """True if a password is configured (env var or settings)."""
-    return get_password_hash() is not None
+    """True if shared-password login is available for this deployment."""
+    return get_password_hash() is not None and not is_oidc_profile_binding_enabled()
+
+
+def is_oidc_profile_binding_enabled() -> bool:
+    """Whether OIDC identities are assigned to exactly one Hermes profile."""
+    try:
+        from api.auth_oidc import _resolve_oidc_config
+
+        cfg = _resolve_oidc_config()
+        return bool(
+            is_oidc_auth_enabled()
+            and cfg.get("profile_claim")
+            and isinstance(cfg.get("profile_map"), dict)
+            and cfg.get("profile_map")
+        )
+    except Exception as exc:
+        logger.debug("Failed to inspect OIDC profile binding: %s", exc)
+        return False
 
 
 def _passkey_feature_flag_enabled() -> bool:
@@ -1239,6 +1256,26 @@ def check_auth(handler, parsed) -> bool:
         return False
     session_info = ensure_trusted_auth_session(handler)
     if session_info:
+        if is_oidc_profile_binding_enabled() and (
+            session_info.get("auth_type") != "oidc"
+            or not session_info.get("bound_profile")
+        ):
+            cookie_value = parse_cookie(handler)
+            if cookie_value:
+                invalidate_session(cookie_value)
+                handler._trusted_auth_session_rejected = True
+            if parsed.path.startswith('/api/'):
+                body = b'{"error":"Profile-bound SSO is required"}'
+                handler.send_response(401)
+                handler.send_header('Content-Type', 'application/json')
+            else:
+                body = b'Profile-bound SSO is required'
+                handler.send_response(401)
+                handler.send_header('Content-Type', 'text/plain; charset=utf-8')
+            handler.send_header('Content-Length', str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
+            return False
         if session_info.get('auth_type') == 'oidc' and session_info.get('bound_profile'):
             _apply_trusted_session_profile(
                 handler,
