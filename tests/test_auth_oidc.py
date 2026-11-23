@@ -229,6 +229,28 @@ def test_profile_bound_oidc_disables_shared_password_login(monkeypatch):
     assert auth.is_password_auth_enabled() is False
 
 
+def test_partial_profile_bound_oidc_configuration_fails_closed_for_password(monkeypatch):
+    import api.auth as auth
+
+    monkeypatch.setattr(auth, "get_password_hash", lambda: "configured-hash")
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {
+            "issuer": "",
+            "client_id": "",
+            "allow_claim": "",
+            "allow_values": [],
+            "profile_claim": "groups",
+            "profile_map": {"shop-a-owner": "shop-a"},
+        },
+    )
+
+    assert auth.is_oidc_profile_binding_enabled() is True
+    assert auth.is_oidc_auth_enabled() is False
+    assert auth.is_password_auth_enabled() is False
+
+
 def test_single_profile_oidc_does_not_implicitly_disable_password(monkeypatch):
     import api.auth as auth
 

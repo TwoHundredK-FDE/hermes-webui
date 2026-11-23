@@ -444,17 +444,16 @@ def is_password_auth_enabled() -> bool:
 
 
 def is_oidc_profile_binding_enabled() -> bool:
-    """Whether OIDC identities are assigned to exactly one Hermes profile."""
+    """Whether profile-bound SSO is configured or being configured.
+
+    A partial OIDC setup must not leave legacy shared-password login available;
+    otherwise a tenant deployment can silently fall back to an unbound session.
+    """
     try:
         from api.auth_oidc import _resolve_oidc_config
 
         cfg = _resolve_oidc_config()
-        return bool(
-            is_oidc_auth_enabled()
-            and cfg.get("profile_claim")
-            and isinstance(cfg.get("profile_map"), dict)
-            and cfg.get("profile_map")
-        )
+        return bool(cfg and (cfg.get("profile_claim") or cfg.get("profile_map")))
     except Exception as exc:
         logger.debug("Failed to inspect OIDC profile binding: %s", exc)
         return False
